@@ -326,18 +326,43 @@ pub fn confirm_wallet(args: ConfirmWalletArgs) -> Result<()> {
 
 #[derive(Debug, clap::Args)]
 pub struct SignArgs {
-    /// The exact text to sign, as the site or the api gave it. A message
-    /// names the bot and the request, so its signature can't be replayed.
-    pub message: String,
+    /// `start` or `stop` the bot's retirement.
+    pub action: String,
+    /// The bot's id, as the site shows it.
+    #[arg(long)]
+    pub bot: String,
+    /// The request id the site gave for this retirement.
+    #[arg(long)]
+    pub request: String,
+    /// Don't ask before signing (for scripts that already showed the text).
+    #[arg(long)]
+    pub yes: bool,
 }
 
-/// The author key's signature (EIP-191, 0x hex) over a message, on stdout,
-/// with the signing address on stderr: the signing command
-/// (TRUST.md#bundle-encryption), for proving ownership of bots.
+/// The author key's signature (EIP-191, 0x hex), on stdout, over a request
+/// to start or stop a bot's retirement: the signing command
+/// (TRUST.md#bundle-encryption). It signs only that message, which names the
+/// bot and the request, so its signature can't be replayed or stand for
+/// anything else; it never signs text it's handed, which a phisher could
+/// word as something else (a wallet bind, say).
 pub fn sign(args: SignArgs) -> Result<()> {
+    let action = match args.action.as_str() {
+        "start" | "stop" => args.action.as_str(),
+        other => bail!("`{other}` isn't an action: start or stop"),
+    };
+    let message = botstadia_shared::platform::retirement_message(action, &args.bot, &args.request);
     let key = existing_key()?;
-    eprintln!("Signed by author key {}", key.address());
-    println!("{}", key.sign(&args.message)?);
+    println!("Sign with author key {}:\n\n{message}\n", key.address());
+    println!("Don't go on if you didn't start this on the site yourself.");
+    if !args.yes {
+        if !config::interactive() {
+            bail!("run it interactively, or pass --yes once you've checked the text");
+        }
+        if !config::ask("Sign? [y/N] ")?.eq_ignore_ascii_case("y") {
+            bail!("not signed");
+        }
+    }
+    println!("{}", key.sign(&message)?);
     Ok(())
 }
 
