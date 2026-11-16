@@ -352,8 +352,9 @@ pub fn sign(args: SignArgs) -> Result<()> {
     };
     let message = botstadia_shared::platform::retirement_message(action, &args.bot, &args.request);
     let key = existing_key()?;
-    println!("Sign with author key {}:\n\n{message}\n", key.address());
-    println!("Don't go on if you didn't start this on the site yourself.");
+    // The prompt on stderr: stdout carries only the signature.
+    eprintln!("Sign with author key {}:\n\n{message}\n", key.address());
+    eprintln!("Don't go on if you didn't start this on the site yourself.");
     if !args.yes {
         if !config::interactive() {
             bail!("run it interactively, or pass --yes once you've checked the text");
