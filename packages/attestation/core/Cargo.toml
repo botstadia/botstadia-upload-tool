@@ -1,0 +1,43 @@
+[package]
+name = "botstadia-attestation-core"
+description = "What the attestation proof checks: a Confidential Space token, its claims, and the journal the results contract reads."
+version = "0.1.0"
+edition = "2024"
+publish = false
+# No workspace inheritance here: the zkVM guest builds this crate in a
+# workspace of its own, with a toolchain of its own, and every setting has to
+# read the same there.
+
+[dependencies]
+serde = { version = "1.0.229", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0.151", default-features = false, features = ["alloc"] }
+base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
+hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+# The guest patches these with RISC Zero's accelerated forks of the same
+# versions, so they stay on the 0.9 / 0.10 lines those forks track.
+rsa = { version = "0.9.9", default-features = false, features = ["sha2"] }
+sha2 = { version = "0.10.9", default-features = false, features = ["oid"] }
+sha3 = { version = "0.10.8", default-features = false }
+# The certificates of a PKI token's chain, parsed as strict DER (on the same
+# `der` / `spki` 0.7 line as `rsa` 0.9).
+x509-cert = { version = "0.2.5", default-features = false }
+# The fixture's test key, generated from a fixed seed so no private key is
+# ever written down.
+rand_chacha = { version = "0.3.1", optional = true }
+
+[features]
+# Signed test tokens in Google's format, under a test key. Never used by the
+# guest.
+fixture = ["rsa/std", "serde_json/std", "dep:rand_chacha"]
+# Mock attestation for the local target only: a fixed mock CA issuing tokens
+# for the local image (see src/mock.rs). Refuses to build into an enclave image.
+mock = ["fixture"]
+
+[dev-dependencies]
+# The fixture module, for the unit tests.
+rsa = { version = "0.9.9", features = ["sha2", "std"] }
+rand_chacha = "0.3.1"
+serde_json = { version = "1.0.151", features = ["std"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(botstadia_image)"] }

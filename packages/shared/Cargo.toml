@@ -1,0 +1,15 @@
+[package]
+name = "botstadia-shared"
+description = "Types shared by every Botstadia crate. Must compile for native and every wasm target."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+# A machine's heartbeat is free-form JSON.
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

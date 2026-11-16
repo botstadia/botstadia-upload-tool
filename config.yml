@@ -1,0 +1,24 @@
+# Public values the public source is built and checked against: chain ids,
+# contract addresses, trust anchors. Exported from BotStadia's private
+# config.yml, entry by entry; `{{.KEY}}` names another entry here.
+vars:
+  CHAIN_TOKEN_TESTNET: "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+  CHAIN_TESTNET_SETTLEMENT: "0x3eeB6D36DE9CBF82feeF09F50C4A49707eB0Ff2A"
+  WALLET_FALLBACK_PAYMASTER: "0x777777777777AeC03fd955926DbF81597e66834C"
+  WALLET_CONTRACTS_TESTNET: >-
+    {"chain_id":84532,
+    "entry_point":"0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "safe_singleton":"0x29fcB43b46531BcA003ddC8FCB67FFE91900C762",
+    "proxy_factory":"0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
+    "safe_4337_module":"0x75cf11467937ce3F2f357CE24ffc3DBF8fD5c226",
+    "safe_module_setup":"0x2dd68b007B46fBe91B9A7c3EDa5A7a1063cB5b47",
+    "multi_send":"0x38869bf66a61cF6bDB996A6aE40D5853Fd43B526",
+    "multi_send_call_only":"0x9641d764fc13c8B624c04430C7356C1C7C8102e2",
+    "webauthn_shared_signer":"0x94a4F6affBd8975951142c3999aEAB7ecee555c2",
+    "webauthn_signer_factory":"0x1d31F259eE307358a26dFb23EB365939E8641195",
+    "p256_verifiers":"0x1000000000000000000000000000000000000000000",
+    "usdc":"{{.CHAIN_TOKEN_TESTNET}}",
+    "usdc_name":"USDC",
+    "paymaster":"0x31BE08D380A21fc740883c0BC434FcFc88740b58",
+    "fallback_paymaster":"{{.WALLET_FALLBACK_PAYMASTER}}",
+    "settlement":"{{.CHAIN_TESTNET_SETTLEMENT}}"}
