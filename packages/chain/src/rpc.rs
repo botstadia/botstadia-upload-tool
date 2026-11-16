@@ -28,19 +28,19 @@ pub enum BlockTag {
 impl BlockTag {
     /// The head a decision waits on before it counts as settled
     /// (TRUST.md#how-the-enclave-talks-to-the-chain): `finalized`, about
-    /// twenty minutes behind. A testnet build (`--cfg botstadia_testnet`: the
-    /// testnet's image and the testnet's CLI, never a release) waits on
-    /// `safe` instead, so no check there waits on Ethereum's finality
-    /// (OPERATIONS.md#targets).
-    #[cfg(not(botstadia_testnet))]
+    /// twenty minutes behind, on prod and the public testnet alike. A devnet
+    /// build (`--cfg botstadia_devnet`: the devnet's image and its CLI,
+    /// never a release) waits on `safe` instead, so no check there waits on
+    /// Ethereum's finality (OPERATIONS.md#the-devnet).
+    #[cfg(not(botstadia_devnet))]
     pub const SETTLED: Self = Self::Finalized;
-    #[cfg(botstadia_testnet)]
+    #[cfg(botstadia_devnet)]
     pub const SETTLED: Self = Self::Safe;
 
     /// About how long [`Self::SETTLED`] trails the head, for messages.
-    #[cfg(not(botstadia_testnet))]
+    #[cfg(not(botstadia_devnet))]
     pub const SETTLED_LAG: &'static str = "about twenty minutes";
-    #[cfg(botstadia_testnet)]
+    #[cfg(botstadia_devnet)]
     pub const SETTLED_LAG: &'static str = "a few minutes";
 
     pub(crate) fn json(&self) -> Value {

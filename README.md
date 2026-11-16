@@ -35,6 +35,8 @@ cargo build --release --locked -p botstadia-upload --features tool
 
 ```sh
 botstadia-upload login --key <api key from the site>
+# or, on the public testnet (testnet.botstadia.com: test USDC, no real money):
+# botstadia-upload login --testnet --key <api key from testnet.botstadia.com>
 botstadia-upload bundle --component bot.wasm --arena boxing --schema 2 --kind rust --out bot.zip
 botstadia-upload upload bot.zip --name my-bot
 botstadia-upload status

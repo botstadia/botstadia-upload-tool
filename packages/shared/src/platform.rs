@@ -733,7 +733,7 @@ pub const PATH_PUBLIC_REPLAY: &str = "/public/replay";
 /// A session's metrics file, the other half of its archive, the same way.
 pub const PATH_PUBLIC_METRICS: &str = "/public/metrics";
 
-/// The open an admin gave the testnet's compressed week, and the one after.
+/// The open an admin gave the devnet's compressed week, and the one after.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeekOpened {
     /// Unix seconds.
@@ -742,9 +742,10 @@ pub struct WeekOpened {
 }
 endpoint!(
     /// Open a week at once, on a target whose week is compressed (the
-    /// testnet): every arena's week opens on the keeper's next pass, and
+    /// devnet): every arena's week opens on the keeper's next pass, and
     /// later weeks follow from it. Refused where weeks run on the calendar
-    /// (prod), and while a week is still running (OPERATIONS.md#targets).
+    /// (the testnet and prod), and while a week is still running
+    /// (OPERATIONS.md#the-devnet).
     AdminWeekOpen, Post, "/admin/weeks/open", Admin, Empty => WeekOpened
 );
 

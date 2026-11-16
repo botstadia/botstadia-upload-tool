@@ -16,10 +16,15 @@ use crate::seal::{self, Sealed};
 
 #[derive(Debug, clap::Args)]
 pub struct LoginArgs {
-    /// An api key from the site's API keys page.
+    /// An api key from the site's API keys page (testnet.botstadia.com's,
+    /// with --testnet).
     #[arg(long)]
     pub key: String,
-    /// The api to talk to (default: botstadia.com's).
+    /// Use the public testnet (testnet.botstadia.com: Base Sepolia, test
+    /// USDC, no real money) instead of botstadia.com.
+    #[arg(long, conflicts_with = "api")]
+    pub testnet: bool,
+    /// Another api to talk to, keeping every other setting (local work).
     #[arg(long)]
     pub api: Option<String>,
 }
@@ -27,12 +32,25 @@ pub struct LoginArgs {
 pub fn login(args: LoginArgs) -> Result<()> {
     let mut s = Settings::load()?;
     s.api_key = Some(args.key);
-    if args.api.is_some() {
+    if args.testnet {
+        s.point_at(&config::TESTNET);
+    } else if args.api.is_some() {
         s.api_url = args.api;
+    } else {
+        s.point_at_prod();
     }
+    s.apply_env();
     s.save()?;
     let status: BuilderStatus = api::call::<BuilderStatusGet>(&s, &Empty {})?;
-    println!("Signed in: {} bot(s) on this account.", status.bots.len());
+    let on = if args.testnet {
+        " on the testnet (test USDC, no real money)"
+    } else {
+        ""
+    };
+    println!(
+        "Signed in{on}: {} bot(s) on this account.",
+        status.bots.len()
+    );
     Ok(())
 }
 

@@ -27,8 +27,39 @@ pub fn config_dir() -> Result<PathBuf> {
         .join("botstadia"))
 }
 
-/// What the CLI is pointed at. The default is prod; local work sets
-/// `BOTSTADIA_TARGET=local` or `botstadia login --target local`.
+/// A target a builder can name at login, with everything the tools need to
+/// reach it built in (OPERATIONS.md#targets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Target {
+    pub name: &'static str,
+    pub api_url: &'static str,
+    pub chain_id: u64,
+    pub results: &'static str,
+    /// The GCP project its results contract pins.
+    pub project: &'static str,
+    /// Two public RPC providers, tied to no account of ours, that must agree
+    /// on the BundleKey's proof. Both read `finalized`, as on prod.
+    pub rpc_urls: [&'static str; 2],
+}
+
+/// The public testnet (OPERATIONS.md#the-testnet): Base Sepolia, test USDC,
+/// run exactly like prod. `login --testnet` points the tools at it. A test
+/// ties these to config.yml.
+pub const TESTNET: Target = Target {
+    name: "testnet",
+    api_url: "https://api-testnet.botstadia.com",
+    chain_id: 84532,
+    results: "0x83792f6c44F426E077C715Ef283698c4bA5ba371",
+    project: "botstadia",
+    rpc_urls: [
+        "https://sepolia.base.org",
+        "https://base-sepolia-rpc.publicnode.com",
+    ],
+};
+
+/// What the CLI is pointed at. The default is prod; `login --testnet`
+/// points it at the public testnet, and local work sets
+/// `BOTSTADIA_TARGET=local` with the other `BOTSTADIA_*` values.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Settings {
     pub target: Option<String>,
@@ -51,7 +82,15 @@ impl Settings {
                 .with_context(|| format!("reading {}", path.display()))?,
             Err(_) => Settings::default(),
         };
-        // The environment wins, for CI and tests.
+        s.apply_env();
+        Ok(s)
+    }
+
+    /// The environment wins, for CI, tests and local work: applied on load,
+    /// and again after `login` points at a target, so a `BOTSTADIA_*` value
+    /// still decides what the login checks against.
+    pub fn apply_env(&mut self) {
+        let s = self;
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         if let Some(v) = env("BOTSTADIA_TARGET") {
             s.target = Some(v);
@@ -74,7 +113,26 @@ impl Settings {
         if let Some(v) = env("BOTSTADIA_PROJECT") {
             s.project = Some(v);
         }
-        Ok(s)
+    }
+
+    /// Point at `target`, replacing whatever target was set before.
+    pub fn point_at(&mut self, target: &Target) {
+        self.target = Some(target.name.to_string());
+        self.api_url = Some(target.api_url.to_string());
+        self.chain_id = Some(target.chain_id);
+        self.results = Some(target.results.to_string());
+        self.project = Some(target.project.to_string());
+        self.rpc_urls = Some(target.rpc_urls.iter().map(|u| u.to_string()).collect());
+    }
+
+    /// Point at prod: its built-in api, and nothing of another target kept.
+    pub fn point_at_prod(&mut self) {
+        self.target = None;
+        self.api_url = None;
+        self.chain_id = None;
+        self.results = None;
+        self.project = None;
+        self.rpc_urls = None;
     }
 
     pub fn save(&self) -> Result<()> {
@@ -274,6 +332,42 @@ mod tests {
         // Nothing left beside it.
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `login --testnet`'s built-in values are the testnet's in config.yml.
+    #[test]
+    fn the_built_in_testnet_is_config_ymls() {
+        let config = include_str!("../../../../config.yml");
+        let value = |key: &str| {
+            config
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(&format!("{key}: ")))
+                .map(|v| v.trim().trim_matches('"').to_string())
+                .unwrap_or_else(|| panic!("{key} not in config.yml"))
+        };
+        assert_eq!(value("URL_API_TESTNET"), TESTNET.api_url);
+        assert_eq!(value("CHAIN_ID_TESTNET"), TESTNET.chain_id.to_string());
+        assert_eq!(value("CHAIN_TESTNET_RESULTS"), TESTNET.results);
+        assert_eq!(value("CHAIN_PROJECT_ID_TESTNET"), TESTNET.project);
+        assert_eq!(value("URL_RPC_TESTNET"), TESTNET.rpc_urls[0]);
+        assert_eq!(value("WALLET_PUBLIC_RPC_TESTNET"), TESTNET.rpc_urls[1]);
+    }
+
+    #[test]
+    fn pointing_at_a_target_replaces_the_last_one() {
+        let mut s = Settings {
+            api_url: Some("http://localhost:28080".into()),
+            api_key: Some("k".into()),
+            ..Settings::default()
+        };
+        s.point_at(&TESTNET);
+        assert_eq!(s.api_url(), TESTNET.api_url);
+        assert_eq!(s.chain_id, Some(84532));
+        assert_eq!(s.rpc_urls.as_ref().map(Vec::len), Some(2));
+        s.point_at_prod();
+        assert_eq!(s.api_url(), "https://api.botstadia.com");
+        assert_eq!((s.target.as_ref(), s.results.as_ref()), (None, None));
+        assert_eq!(s.api_key.as_deref(), Some("k"), "the key stays");
     }
 
     /// One test, since the config folder comes from the environment.

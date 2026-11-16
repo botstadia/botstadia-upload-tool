@@ -93,7 +93,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 [workspace.lints.rust]
 unsafe_code = "deny"
 # Set by the enclave image build: mock attestation refuses to compile in it.
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(botstadia_image)", "cfg(botstadia_testnet)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(botstadia_image)", "cfg(botstadia_testnet)", "cfg(botstadia_devnet)"] }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
