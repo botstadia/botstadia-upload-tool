@@ -39,7 +39,7 @@ enum Command {
     Rekey,
     /// Sign with your oldest bot's key, so a first wallet binds at once.
     ConfirmWallet(commands::ConfirmWalletArgs),
-    /// Sign a bot's retirement request with your author key, which proves you own it.
+    /// Sign a bot's retirement request with your author key, or mark it code-exposed.
     Sign(commands::SignArgs),
 }
 

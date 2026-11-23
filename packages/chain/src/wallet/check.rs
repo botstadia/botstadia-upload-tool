@@ -52,11 +52,24 @@ pub async fn is_valid<T: Transport>(
     signature: &[u8],
     setup: Option<&[u8]>,
 ) -> anyhow::Result<bool> {
+    is_valid_at(rpc, c, wallet, hash, signature, setup, BlockTag::Latest).await
+}
+
+/// [`is_valid`] at one block, where anyone can ask again: owners change.
+pub async fn is_valid_at<T: Transport>(
+    rpc: &Client<T>,
+    c: &Contracts,
+    wallet: Address,
+    hash: B256,
+    signature: &[u8],
+    setup: Option<&[u8]>,
+    at: BlockTag,
+) -> anyhow::Result<bool> {
     let data = call_data(c, wallet, hash, signature, setup);
     let v = rpc
         .request(
             "eth_call",
-            serde_json::json!([{ "data": Bytes::from(data) }, BlockTag::Latest.json()]),
+            serde_json::json!([{ "data": Bytes::from(data) }, at.json()]),
         )
         .await?;
     let out: Bytes = serde_json::from_value(v)?;

@@ -227,7 +227,19 @@ impl<T: Transport> Bundlers<T> {
         for (i, b) in self.list.iter().enumerate() {
             match b.send(c, op).await {
                 Ok(h) => return Ok((i, h)),
-                Err(e) if is_refusal(&e) => return Err(e.context(format!("{} refused it", b.name))),
+                Err(e) if is_refusal(&e) => {
+                    if errors.is_empty() {
+                        return Err(e.context(format!("{} refused it", b.name)));
+                    }
+                    // One before it failed, and may hold it though it didn't
+                    // say so yet: this refusal isn't the operation's verdict,
+                    // so it isn't passed on as one.
+                    anyhow::bail!(
+                        "{} refused it ({e:#}), after {}: it may still land",
+                        b.name,
+                        errors.join("; ")
+                    );
+                }
                 Err(e) => {
                     // Only a bundler known not to hold it passes it on: one
                     // that can't say might yet include it.
@@ -243,5 +255,56 @@ impl<T: Transport> Bundlers<T> {
             }
         }
         anyhow::bail!("no bundler took the operation: {}", errors.join("; "))
+    }
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    /// A bundler that times out on a send (`Down`) or refuses it.
+    enum Node {
+        Down,
+        Refuses,
+    }
+
+    impl Transport for Node {
+        async fn post(&self, body: String) -> anyhow::Result<String> {
+            let refused = body.contains("eth_sendUserOperation");
+            Ok(match self {
+                Self::Down if refused => anyhow::bail!("timed out"),
+                Self::Refuses if refused => json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "priority fee too low"}}),
+                _ => json!({"jsonrpc": "2.0", "id": 1, "result": null}),
+            }
+            .to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_after_an_ambiguous_failure_is_no_verdict() {
+        let a = format!("{:#x}", alloy_primitives::Address::ZERO);
+        let c: Contracts = serde_json::from_value(json!({
+            "chain_id": 84532,
+            "entry_point": a, "safe_singleton": a, "proxy_factory": a,
+            "safe_4337_module": a, "safe_module_setup": a, "multi_send": a,
+            "multi_send_call_only": a, "webauthn_shared_signer": a,
+            "webauthn_signer_factory": a,
+            "p256_verifiers": "0x1000000000000000000000000000000000000000000",
+            "usdc": a, "usdc_name": "USDC", "paymaster": a, "settlement": a,
+        }))
+        .unwrap();
+        let sent = async |nodes: Vec<Node>| {
+            let list = nodes
+                .into_iter()
+                .map(|n| Bundler::new("b".to_string(), Flavor::Generic, n))
+                .collect();
+            Bundlers { list }
+                .send(&c, &UserOp::default())
+                .await
+                .unwrap_err()
+        };
+        assert!(is_refusal(&sent(vec![Node::Refuses]).await));
+        let after = sent(vec![Node::Down, Node::Refuses]).await;
+        assert!(!is_refusal(&after), "the first may hold it: {after:#}");
     }
 }

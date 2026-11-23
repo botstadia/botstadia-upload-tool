@@ -1,7 +1,7 @@
 [package]
 name = "botstadia-upload"
 description = "The public upload path (TRUST.md#bundle-encryption): the author key and its recovery phrase, bundle encryption to the BundleKey and the author key, rekeying, signing, and the checks on the BundleKey's boot proof. Linked by the CLI and the enclave; exported to the standalone upload tool's public repository."
-version = "0.1.3"
+version = "0.1.4"
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true

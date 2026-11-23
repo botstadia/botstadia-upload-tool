@@ -392,6 +392,8 @@ pub fn retirement_message(action: &str, bot_id: &str, request: &str) -> String {
 
 /// What a payout statement says (MONEY.md#how-a-builder-earns). One naming
 /// an address carries the eligibility attestation; one naming zero doesn't.
+/// `account` is the account's statement reference
+/// (`botstadia_chain::wallet::statement_ref`), published with it, never its id.
 pub fn statement_message(account: &str, number: u64, address: &str) -> String {
     let address = address.to_lowercase();
     if address == ZERO_ADDRESS {
@@ -403,11 +405,6 @@ pub fn statement_message(account: &str, number: u64, address: &str) -> String {
             "BotStadia payout statement {number}\naccount: {account}\naddress: {address}\nPay my bots' builder share to this address. I am 18 or older, I am not an excluded person, such as a US person or a sanctioned person, and I am not acting for one."
         )
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WalletBind {
-    pub address: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,6 +446,14 @@ pub struct RetireBot {
     pub bot_id: String,
 }
 
+/// A request with no proof, with the asking device's own random id (kept in
+/// its storage, never a cookie), which its daily limit counts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetireAsk {
+    pub bot_id: String,
+    pub device: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetireSigned {
     pub bot_id: String,
@@ -465,7 +470,6 @@ pub struct RetirementState {
     pub effective_at: u64,
 }
 
-endpoint!(WalletBindStart, Post, "/wallet/bind", Verified, WalletBind => BindState);
 endpoint!(
     /// `botstadia confirm-wallet` posts its signature here: it names the
     /// account and wallet itself, so no sign-in is needed.
@@ -482,13 +486,17 @@ endpoint!(
 endpoint!(RetireStopByAuthor, Post, "/bots/retire/author/stop", Public, RetireSigned => RetirementState);
 endpoint!(
     /// Anyone signed in may ask, with no proof; a person judges it.
-    RetireRequest, Post, "/bots/retire/request", Verified, RetireBot => RetirementState
+    RetireRequest, Post, "/bots/retire/request", Verified, RetireAsk => RetirementState
 );
 
 endpoint!(
     /// A retirement started by the account's wallet: its signature alone
     /// names the account, so no sign-in is needed.
     RetireByWallet, Post, "/bots/retire/wallet", Public, RetireSigned => RetirementState
+);
+endpoint!(
+    /// The wallet stops a sign-in's retirement or its own, by signature alone.
+    RetireStopByWallet, Post, "/bots/retire/wallet/stop", Public, RetireSigned => RetirementState
 );
 
 // --- account wallets (TRUST.md#account-wallets) ----------------------------------------
@@ -533,6 +541,10 @@ pub struct WalletSetup {
     pub labels: std::collections::BTreeMap<String, String>,
     /// The wallet's ERC-1271 signature over [`wallet_setup_message`].
     pub signature: String,
+    /// It's meant as the account's first wallet: refused if there's one, so
+    /// a page that didn't know can't start a rebind.
+    #[serde(default)]
+    pub first: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -561,6 +573,218 @@ pub struct WalletsMine {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalletAddress {
     pub address: String,
+}
+
+/// Where one of a builder's bots stands (COMPETITION.md#warm-up,
+/// BOTS.md#bundles). A warm-up shows its status and nothing more.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BotStage {
+    VerifyQueued,
+    #[default]
+    Verifying,
+    /// Never passed its first verification, so it isn't a bot.
+    Failed,
+    WarmUpQueued,
+    WarmUpRunning,
+    /// Waiting on BotStadia: nothing for the builder to do.
+    Waiting,
+    Rated,
+    Retired,
+}
+
+/// One bot's requests with no proof, as the person judging them reads them
+/// (MONEY.md#retiring-a-bot): one entry a bot.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetirementQueued {
+    /// The newest request listed: judging it covers the bot's up to it.
+    pub id: String,
+    pub bot_id: String,
+    pub bot_name: String,
+    pub arena_id: String,
+    pub builder: Option<String>,
+    pub builder_email: String,
+    /// When the bot's first request's wait ends: no grant before it.
+    pub judge_from: u64,
+    /// The newest first.
+    pub requests: Vec<RetirementRequested>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetirementRequested {
+    pub requester: Option<String>,
+    pub requester_email: String,
+    /// When the asking account was made.
+    pub requester_since: String,
+    pub started_at: u64,
+}
+
+/// Who started a retirement, which decides who may stop it
+/// (MONEY.md#retiring-a-bot).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetiredBy {
+    Signin,
+    Wallet,
+    Author,
+    Request,
+}
+
+impl RetiredBy {
+    /// Whether a sign-in or the account's wallet may stop it.
+    pub fn account_may_stop(self) -> bool {
+        matches!(self, Self::Signin | Self::Wallet)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retirement {
+    pub by: RetiredBy,
+    /// Unix ms. A bot in a running week's field also plays out that week.
+    pub effective_at: u64,
+    /// A request with no proof, once a person granted it.
+    pub granted: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountBot {
+    pub id: String,
+    pub name: String,
+    pub arena_id: String,
+    pub stage: BotStage,
+    /// Of a queued verification or warm-up.
+    pub queue_ahead: Option<u64>,
+    /// Why it failed verification: told to its builder only.
+    pub failure: Option<String>,
+    /// The rating's mean and uncertainty, in millionths.
+    pub mu: Option<i64>,
+    pub sigma: Option<i64>,
+    /// One that never has retires at once on sign-in.
+    pub played_bettable: bool,
+    pub awaiting_rekey: bool,
+    pub code_exposed: bool,
+    /// In a running week's field until its final's close (unix seconds).
+    pub in_week_until: Option<u64>,
+    pub retirements: Vec<Retirement>,
+    /// The field a statement signed now reaches it at (unix seconds): this
+    /// week's while that isn't set yet, else the next.
+    pub starts_at: Option<u64>,
+    /// It still pays a wallet the account's statement can't re-point
+    /// (MONEY.md#stolen-sign-ins, "What a rebind covers").
+    pub pays_earlier: Option<String>,
+}
+
+/// A statement waiting on its wallet's bind.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldStatement {
+    pub number: u64,
+    pub address: String,
+    /// When the wait ends, unix ms.
+    pub effective_at: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountBots {
+    pub bots: Vec<AccountBot>,
+    pub bot_cap: u64,
+    /// The wait before a retirement or a bind takes effect, in seconds.
+    pub waiting_period_s: u64,
+    /// The address in force; zero isn't earning.
+    pub payout_address: String,
+    pub held: Option<HeldStatement>,
+    /// What reached an address the account signed for, in USDC's millionths,
+    /// as indexed.
+    pub paid_total: u64,
+    /// Shares whose transfer failed, as indexed. Claiming one emits nothing,
+    /// so what's still owed is the chain's `builderOwed`.
+    pub failed_total: u64,
+    pub next_statement: u64,
+    /// The earliest field a statement signed now would start from (unix
+    /// seconds), where the week's times are set. Each bot has its own.
+    pub starts_at: Option<u64>,
+    /// The same for one signed by a wallet whose bind is waiting, or held.
+    pub starts_after_wait: Option<u64>,
+}
+
+/// An account's bets across all its wallets, as indexed. What a claim signs
+/// for still reads the chain.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountBets {
+    pub pools: Vec<BetPool>,
+    /// The newest first.
+    pub activity: Vec<BetActivity>,
+}
+
+/// One wallet's whole position in one pool.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BetPool {
+    /// The session's id, or the week's.
+    pub id: String,
+    pub week: bool,
+    pub wallet: String,
+    pub arena_id: Option<String>,
+    pub close: u64,
+    /// In the week now running, or the last to have run: what "this week's
+    /// net" counts.
+    pub this_week: bool,
+    /// Only one bot is backed: as it stands, every stake comes back.
+    pub one_sided: bool,
+    pub total: u64,
+    pub stakes: Vec<BetStake>,
+    pub state: BetState,
+    /// What it pays by the contract's rules, claimed or not.
+    pub owed: u64,
+    pub claimed: Option<u64>,
+    /// What a week's claim passes: its bound final's entry, or the scheduled
+    /// final's until the binding is indexed (the contract checks its hash).
+    pub final_entry: Option<String>,
+    /// A session's round (0: the final) and who's in it, for its title.
+    pub round: Option<u64>,
+    pub against: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BetStake {
+    /// The bot's digest, `0x` hex, as the pool has it.
+    pub digest: String,
+    pub bot_id: Option<String>,
+    pub name: Option<String>,
+    pub amount: u64,
+    /// What the whole position returns if this bot alone finishes first and
+    /// betting closed now.
+    pub pays_if_first: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BetState {
+    Pending,
+    Won,
+    /// Backed one of several that shared first: the winners split the pool.
+    Tied,
+    Lost,
+    /// Only one bot was backed: refunded in full.
+    OneSided,
+    /// Nobody backed the winner: refunded less the fee.
+    NoWinningBacker,
+    Voided,
+    Cancelled,
+    KeyRevoked,
+    PastDeadline,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BetActivity {
+    pub kind: String,
+    pub wallet: String,
+    /// The session or week, for a bet or a claim.
+    pub id: Option<String>,
+    pub amount: u64,
+    pub block: u64,
+    pub tx_hash: String,
+    /// A bet someone else's money made: an auto-back fill from the deposit,
+    /// or a bet made for this wallet. It didn't leave the wallet.
+    pub paid_elsewhere: bool,
 }
 
 /// A JSON-RPC call relayed through the api, which holds the providers' keys.
@@ -615,8 +839,75 @@ endpoint!(
     WalletPasskeyAdd, Post, "/wallet/passkey", Verified, PasskeyAdd => Empty
 );
 endpoint!(
-    /// The account wallet's bets and claims as indexed (sessions and weeks).
+    /// One wallet's raw bet events. For a site built before `/account/bets`:
+    /// delete once that one has been live a release.
     WalletBetsGet, Get, "/wallet/bets", Verified, WalletAddress => Vec<serde_json::Value>
+);
+/// One auto-back of the account's (MONEY.md#standing-orders), as indexed.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountOrder {
+    /// The wallet it belongs to.
+    pub owner: String,
+    /// The bot's bundle digest, `sha256-…`, which an order names.
+    pub digest: String,
+    pub bot_id: Option<String>,
+    pub name: Option<String>,
+    pub arena_id: Option<String>,
+    /// verifying | active | retired, or none for a digest we don't know.
+    pub bot_state: Option<String>,
+    pub held: bool,
+    pub code_exposed: bool,
+    /// USDC millionths a session.
+    pub amount: u64,
+    pub daily_cap: u64,
+    /// Sessions it filled today (UTC), as the contract counts.
+    pub filled_today: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountOrders {
+    pub orders: Vec<AccountOrder>,
+    /// What each wallet has set aside, as indexed; the chain is the truth.
+    pub balances: Vec<(String, u64)>,
+}
+
+endpoint!(
+    /// The account's auto-backs across its wallets.
+    AccountOrdersGet, Get, "/account/orders", Verified, Empty => AccountOrders
+);
+endpoint!(
+    /// Every notice choice, as the person has it (OPERATIONS.md#notifications).
+    NoticeChoicesGet, Get, "/account/notices", Verified, Empty => crate::notices::NoticeChoices
+);
+endpoint!(
+    /// Set one notice choice, answering all of them.
+    NoticeChoiceSet, Post, "/account/notices", Verified, crate::notices::NoticeChoice => crate::notices::NoticeChoices
+);
+endpoint!(
+    /// The account's recent notices, as the site lists them.
+    NoticesRecentGet, Get, "/account/notices/recent", Verified, Empty => Vec<crate::notices::RecentNotice>
+);
+endpoint!(
+    /// The bots the account follows.
+    FollowsGet, Get, "/account/follows", Verified, Empty => Vec<crate::notices::FollowedBot>
+);
+endpoint!(
+    /// Follow or unfollow a bot, answering the list.
+    FollowSet, Post, "/follows", Verified, crate::notices::Follow => Vec<crate::notices::FollowedBot>
+);
+endpoint!(
+    /// An emailed notice's opt-out link, confirmed on the page by a press:
+    /// its token turns that one choice off and nothing else.
+    NoticeOptOutPost, Post, "/notices/opt-out", Public, crate::notices::NoticeOptOut => Empty
+);
+endpoint!(
+    /// The signed-in builder's bots and earning, as the site shows them. An
+    /// api key reads `BuilderStatusGet` instead.
+    AccountBotsGet, Get, "/account/bots", Verified, Empty => AccountBots
+);
+endpoint!(
+    /// The account's bets across all its wallets, and their activity.
+    AccountBetsGet, Get, "/account/bets", Verified, Empty => AccountBets
 );
 endpoint!(WalletOwnerLabelPost, Post, "/wallet/owner-label", Verified, OwnerLabel => Empty);
 endpoint!(
@@ -714,6 +1005,10 @@ endpoint!(AdminBotRegister, Post, "/admin/bots/register", Admin, HouseBotReq => 
 endpoint!(AdminBotRename, Post, "/admin/bots/rename", Admin, BotRename => Empty);
 endpoint!(AdminBotRetire, Post, "/admin/bots/retire", Admin, RetireBot => Empty);
 endpoint!(AdminJobRequeue, Post, "/admin/jobs/requeue", Admin, IdOnly => Empty);
+endpoint!(
+    /// Retirement requests with no proof, one entry a bot.
+    AdminRetirements, Get, "/admin/retirements", Admin, Empty => Vec<RetirementQueued>
+);
 endpoint!(AdminRetirementJudge, Post, "/admin/retirements/judge", Admin, Judgement => Empty);
 endpoint!(AdminBindingRetiring, Post, "/admin/bindings/retiring", Admin, BindingOnly => Empty);
 endpoint!(AdminImageMark, Post, "/admin/images/mark", Admin, DigestOnly => Empty);
@@ -856,13 +1151,352 @@ mod tests {
             takes_key::<AuthConfirmReset>(),
             takes_key::<AuthSendVerification>(),
             takes_key::<AccountFinishRegistration>(),
-            takes_key::<WalletBindStart>(),
+            takes_key::<WalletSetupPost>(),
             takes_key::<WalletBindCancel>(),
             takes_key::<StatementsSubmit>(),
             takes_key::<RetireBySignin>(),
             takes_key::<RetireStopBySignin>(),
             takes_key::<RetireRequest>(),
+            takes_key::<AccountBetsGet>(),
+            takes_key::<AccountBotsGet>(),
+            takes_key::<NoticeChoicesGet>(),
+            takes_key::<AccountOrdersGet>(),
+            takes_key::<SaferGet>(),
+            takes_key::<SaferLimitPost>(),
+            takes_key::<SaferBlockPost>(),
+            takes_key::<SaferBlockSignPost>(),
+            takes_key::<NoticesRecentGet>(),
+            takes_key::<NoticeChoiceSet>(),
+            takes_key::<FollowsGet>(),
+            takes_key::<FollowSet>(),
+            takes_key::<NoticeOptOutPost>(),
+            takes_key::<GeoGet>(),
+            takes_key::<BotCodeExposed>(),
+            takes_key::<WalletRebindCancelSigned>(),
+            takes_key::<TakeBackNonceGet>(),
+            takes_key::<TakeBackPost>(),
+            takes_key::<crate::auth::AccountEmailChange>(),
+            takes_key::<crate::auth::AccountEmailConfirm>(),
+            takes_key::<crate::auth::LinkPeek>(),
+            takes_key::<crate::auth::LinkUse>(),
+            takes_key::<crate::auth::AuthSendSigninLink>(),
+            takes_key::<crate::auth::AuthSigninLink>(),
+            takes_key::<RetireStopByWallet>(),
+            takes_key::<AdminRetirements>(),
+            takes_key::<WalletBetsGet>(),
         ];
         assert!(refused.iter().all(|taken| !taken));
     }
 }
+
+// --- safer play (MONEY.md#safer-play) ----------------------------------------
+
+/// One period's limit, in USDC millionths, with any raise waiting.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaferLimit {
+    /// day | week | month: rolling 24 hours, 7 days, 31 days.
+    pub period: String,
+    /// In force now; none is no limit.
+    pub amount: Option<u64>,
+    /// A raise waiting its cooling-off: what it becomes (none for no limit)
+    /// and when, unix ms.
+    pub raise: Option<(Option<u64>, u64)>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaferBlock {
+    pub id: String,
+    /// timeout | exclusion
+    pub kind: String,
+    pub started_at: u64,
+    /// As asked; none for good.
+    pub asked_end: Option<u64>,
+    /// When it really ends: as asked once the wallet signs, else no later
+    /// than the unsigned most. None for good.
+    pub ends_at: Option<u64>,
+    pub signed: bool,
+    /// What the wallet signs to let it run as asked, when that's longer.
+    pub to_sign: Option<String>,
+}
+
+/// An account's safer play, with what it has spent and its orders' burn in
+/// each period, in USDC millionths.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaferPlay {
+    pub limits: Vec<SaferLimit>,
+    pub block: Option<SaferBlock>,
+    /// Bet in each rolling period, as indexed: (day, week, month).
+    pub spent: (u64, u64, u64),
+    /// Its standing orders' burn for each period: (day, week, month).
+    pub burn: (u64, u64, u64),
+    /// What a bet or a new order may add in each period now.
+    pub room: (Option<u64>, Option<u64>, Option<u64>),
+    /// The chain is indexed to this block: a bet the site placed in a later
+    /// block isn't counted yet, and the site counts it itself.
+    #[serde(default)]
+    pub indexed_to: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaferLimitSet {
+    pub period: String,
+    pub amount: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaferBlockStart {
+    /// timeout | exclusion
+    pub kind: String,
+    /// Its length; none for good (an exclusion only).
+    pub days: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaferBlockSign {
+    pub id: String,
+    pub signer: String,
+    pub signature: String,
+}
+
+/// What the account's wallet signs to let a block run past the unsigned most:
+/// the page composes it itself, so the server never chooses what's signed.
+/// `account` is the statement reference.
+pub fn block_message(account: &str, id: &str, kind: &str, until_ms: Option<u64>) -> String {
+    let until = until_ms.map_or("for good".to_string(), |at| {
+        format!("until {}", utc_minute(at))
+    });
+    format!(
+        "BotStadia: no betting for me, {until} ({kind}). It can't be ended early.\naccount: {account}\nblock: {id}"
+    )
+}
+
+/// A moment as `2026-11-23 01:59 UTC`, the same on every side.
+pub fn utc_minute(ms: u64) -> String {
+    let (days, rest) = ((ms / 86_400_000) as i64, ms % 86_400_000);
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        rest / 3_600_000,
+        rest % 3_600_000 / 60_000
+    )
+}
+
+#[cfg(test)]
+mod block_message_tests {
+    use super::*;
+
+    #[test]
+    fn moments_word_the_same_everywhere() {
+        assert_eq!(utc_minute(0), "1970-01-01 00:00 UTC");
+        assert_eq!(utc_minute(1_795_553_918_000), "2026-11-24 20:58 UTC");
+        assert_eq!(utc_minute(951_782_400_000), "2000-02-29 00:00 UTC");
+        assert!(block_message("0xab", "b1", "exclusion", None).contains("for good (exclusion)"));
+    }
+}
+
+endpoint!(
+    /// The account's limits, any timeout or exclusion, and what it has spent.
+    SaferGet, Get, "/account/safer", Verified, Empty => SaferPlay
+);
+endpoint!(
+    /// Set a limit: lower at once, a raise after the cooling-off.
+    SaferLimitPost, Post, "/account/safer/limit", Verified, SaferLimitSet => SaferPlay
+);
+endpoint!(
+    /// Start a timeout or an exclusion, at once and for good.
+    SaferBlockPost, Post, "/account/safer/block", Verified, SaferBlockStart => SaferPlay
+);
+endpoint!(
+    /// The wallet's signature, letting a block run past the unsigned most.
+    SaferBlockSignPost, Post, "/account/safer/block/sign", Verified, SaferBlockSign => SaferPlay
+);
+
+// --- eligibility by place (MONEY.md#eligibility) ------------------------------
+
+/// What the request's place allows. A VPN defeats it; it keeps the site from
+/// serving places the statement excludes. Never a claim or a withdrawal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Geo {
+    /// Adding funds, betting and a non-zero payout statement.
+    pub betting: bool,
+    pub sign_up: bool,
+}
+
+/// Whether a place is on a list of `CC` and `CC-RR` entries.
+fn listed(list: &str, country: &str, region: Option<&str>) -> bool {
+    list.split(',')
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .any(|e| match e.split_once('-') {
+            Some((c, r)) => {
+                c.eq_ignore_ascii_case(country) && region.is_some_and(|x| x.eq_ignore_ascii_case(r))
+            }
+            None => e.eq_ignore_ascii_case(country),
+        })
+}
+
+/// The place's eligibility under the target's lists. Empty lists block
+/// nowhere; an unknown country blocks nothing.
+pub fn geo(excluded: &str, sanctioned: &str, country: Option<&str>, region: Option<&str>) -> Geo {
+    let Some(country) = country.filter(|c| !c.is_empty()) else {
+        return Geo {
+            betting: true,
+            sign_up: true,
+        };
+    };
+    let sanctioned = listed(sanctioned, country, region);
+    Geo {
+        betting: !sanctioned && !listed(excluded, country, region),
+        sign_up: !sanctioned,
+    }
+}
+
+endpoint!(
+    /// What the caller's place allows, for the site's refusals.
+    GeoGet, Get, "/geo", Public, Empty => Geo
+);
+
+#[cfg(test)]
+mod geo_tests {
+    use super::*;
+
+    #[test]
+    fn places_are_matched_by_country_or_region() {
+        let (ex, sa) = ("US,PR", "CU,UA-43,UA-09");
+        assert_eq!(
+            geo(ex, sa, Some("US"), Some("CA")),
+            Geo {
+                betting: false,
+                sign_up: true
+            }
+        );
+        assert_eq!(
+            geo(ex, sa, Some("cu"), None),
+            Geo {
+                betting: false,
+                sign_up: false
+            }
+        );
+        assert_eq!(
+            geo(ex, sa, Some("UA"), Some("43")),
+            Geo {
+                betting: false,
+                sign_up: false
+            }
+        );
+        assert_eq!(
+            geo(ex, sa, Some("UA"), Some("30")),
+            Geo {
+                betting: true,
+                sign_up: true
+            }
+        );
+        assert_eq!(
+            geo(ex, sa, Some("IL"), None),
+            Geo {
+                betting: true,
+                sign_up: true
+            }
+        );
+        assert_eq!(
+            geo("", "", Some("US"), None),
+            Geo {
+                betting: true,
+                sign_up: true
+            },
+            "testnet"
+        );
+        assert!(geo(ex, sa, None, None).betting);
+    }
+}
+
+// --- the wallet over a stolen sign-in (MONEY.md#stolen-sign-ins) --------------
+
+/// What the account's current wallet signs to cancel a rebind's wait: it
+/// names the account (its statement reference) and the waiting wallet.
+pub fn rebind_cancel_message(account: &str, waiting: &str) -> String {
+    format!(
+        "BotStadia: cancel the wallet waiting to replace this account's wallet.\naccount: {account}\nwaiting: {}",
+        waiting.to_lowercase()
+    )
+}
+
+/// What the account's current wallet signs to take the account back: every
+/// sign-in and api key ends, and its email becomes `email`.
+pub fn take_back_message(account: &str, nonce: &str, email: &str) -> String {
+    format!(
+        "BotStadia: take this account back. Every sign-in and api key ends, and its email becomes {}.\naccount: {account}\nnonce: {nonce}",
+        email.trim().to_lowercase()
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RebindCancelSigned {
+    /// The account's current wallet, which signs.
+    pub wallet: String,
+    /// The wallet waiting to replace it.
+    pub waiting: String,
+    pub signature: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TakeBackNonce {
+    pub nonce: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TakeBack {
+    /// The account's current wallet, which signs.
+    pub wallet: String,
+    pub nonce: String,
+    pub email: String,
+    pub password: String,
+    pub signature: String,
+}
+
+endpoint!(
+    /// The current wallet's signature cancels a rebind's wait, with no
+    /// sign-in: the signature alone names the account.
+    WalletRebindCancelSigned, Post, "/wallet/rebind/cancel-signed", Public, RebindCancelSigned => Empty
+);
+endpoint!(
+    /// A fresh nonce for a take-back's signature.
+    TakeBackNonceGet, Post, "/account/take-back/nonce", Public, Empty => TakeBackNonce
+);
+endpoint!(
+    /// The current wallet takes the account back, with no sign-in.
+    TakeBackPost, Post, "/account/take-back", Public, TakeBack => Empty
+);
+
+// --- a builder marks their own bot code-exposed (TRUST.md#a-leaked-bundlekey-cant-be-taken-back)
+
+/// What the bot's author key or the account's wallet signs to mark it
+/// code-exposed: a label only, which can't be undone.
+pub fn code_exposed_message(bot_id: &str) -> String {
+    format!(
+        "BotStadia: mark this bot code-exposed. Its code may have leaked, and this can't be undone.\nbot: {bot_id}"
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeExposedSigned {
+    pub bot_id: String,
+    /// author | wallet
+    pub by: String,
+    pub signature: String,
+}
+
+endpoint!(
+    /// The bot's author key or the account's wallet marks it code-exposed,
+    /// with no sign-in.
+    BotCodeExposed, Post, "/bots/code-exposed", Public, CodeExposedSigned => Empty
+);

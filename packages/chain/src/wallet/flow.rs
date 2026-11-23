@@ -17,7 +17,7 @@ use super::Contracts;
 use super::bundler::{Estimate, GasPrice, OpReceipt};
 use super::op::{self, Call, OwnerSignature, UserOp};
 use super::{calls, paymaster};
-use crate::rpc::{BlockTag, Client, Transport};
+use crate::rpc::{BlockTag, Client, NodeError, Transport};
 
 /// Paymaster verification gas: with a permit, whose ERC-1271 check runs the
 /// passkey's verification inside the paymaster (about 150k measured on Base
@@ -204,6 +204,98 @@ pub async fn send<T: Transport, B: Bundle, S: Signer>(
 /// refunded to the wallet after the operation.
 pub const SWEEP_USDC_PER_ETH: u64 = 20_000;
 
+/// The operation was handed over and what became of it isn't known. It may
+/// still land, so nothing builds another in its place: that could bet or
+/// withdraw twice.
+#[derive(Debug)]
+pub struct Unconfirmed {
+    pub hash: Option<B256>,
+    /// What the send answered, where it didn't say. Shown last: whatever it
+    /// says, the warning is what's read first.
+    pub cause: Option<String>,
+}
+
+impl std::fmt::Display for Unconfirmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sent, not yet confirmed")?;
+        if let Some(hash) = self.hash {
+            write!(f, " (operation {hash})")?;
+        }
+        write!(f, ": check your balance and bets before trying again")?;
+        if let Some(cause) = &self.cause {
+            write!(f, ". The send's answer was: {cause}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Unconfirmed {}
+
+/// Whether what failed may still land, so mustn't be built again.
+pub fn may_have_landed(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Unconfirmed>().is_some()
+}
+
+/// Refused before it reached a bundler (a rate limit of ours, say).
+#[derive(Debug)]
+pub struct NotSent(pub String);
+
+impl std::fmt::Display for NotSent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "not sent: {}", self.0)
+    }
+}
+
+impl std::error::Error for NotSent {}
+
+/// Whether a send's failure says for sure that it wasn't taken: refused
+/// before any bundler, or the bundler's own verdict on the operation.
+/// Never a transport's error, whatever its text, nor an answer that means
+/// the operation, or another at its nonce, is already known.
+fn not_taken(e: &anyhow::Error) -> bool {
+    if e.downcast_ref::<NotSent>().is_some() {
+        return true;
+    }
+    let Some(node) = e.downcast_ref::<NodeError>() else {
+        return false;
+    };
+    let said = node.message.to_lowercase();
+    super::bundler::is_refusal(e)
+        && ![
+            "aa25",
+            "already known",
+            "already exists",
+            "replacement underpriced",
+        ]
+        .iter()
+        .any(|known| said.contains(known))
+}
+
+/// Hand a signed operation over, and wait for it. Where the answer doesn't
+/// say it wasn't taken, its own hash, known before sending, is what's asked.
+async fn hand_over<B: Bundle>(
+    bundle: &B,
+    c: &Contracts,
+    uo: &UserOp,
+    sleep: &impl AsyncFn(u32),
+) -> anyhow::Result<OpReceipt> {
+    match bundle.send(c, uo).await {
+        Ok(hash) => wait(bundle, hash, sleep).await,
+        Err(e) if not_taken(&e) => Err(e),
+        Err(e) => wait(bundle, uo.hash(c), sleep).await.map_err(|unknown| {
+            match unknown.downcast::<Unconfirmed>() {
+                // Why, kept: it may be why nothing ever arrives.
+                Ok(sent) => Unconfirmed {
+                    cause: Some(format!("{e:#}")),
+                    ..sent
+                }
+                .into(),
+                Err(other) => other,
+            }
+        }),
+    }
+}
+
 /// [`send`], with the calls built once the operation's most gas cost (in
 /// USDC, at [`SWEEP_USDC_PER_ETH`]) is known: how a "send everything"
 /// leaves room for the paymaster's deposit, which it takes before the calls
@@ -221,9 +313,12 @@ pub async fn send_built<T: Transport, B: Bundle, S: Signer>(
     match send_circle(rpc, bundle, signer, c, wallet, &build, &sleep).await {
         // Circle's Paymaster refused it, or can't be reached: Pimlico's
         // ERC-20 paymaster, where this bundle reaches it (MONEY.md#currency).
-        Err(e) if c.fallback_paymaster.is_some() && paymaster_refused(&e) => {
+        Err(e)
+            if c.fallback_paymaster.is_some() && !may_have_landed(&e) && paymaster_refused(&e) =>
+        {
             match send_fallback(rpc, bundle, signer, c, wallet, &build, &sleep).await {
                 Ok(r) => Ok(r),
+                Err(f) if may_have_landed(&f) => Err(f),
                 Err(f) => Err(e.context(format!("and the fallback paymaster: {f:#}"))),
             }
         }
@@ -234,8 +329,11 @@ pub async fn send_built<T: Transport, B: Bundle, S: Signer>(
 /// Whether an operation failed on the paymaster's side: its validation
 /// (AA3x) or its post-op, rather than the calls or the account.
 fn paymaster_refused(e: &anyhow::Error) -> bool {
-    let t = format!("{e:#}");
-    t.contains("AA3") || t.contains("AA50") || t.to_lowercase().contains("paymaster")
+    // The node's own answer only: a transport's error carries URLs and bodies.
+    e.downcast_ref::<NodeError>().is_some_and(|node| {
+        let t = &node.message;
+        t.contains("AA3") || t.contains("AA50") || t.to_lowercase().contains("paymaster")
+    })
 }
 
 /// One operation through Pimlico's ERC-20 paymaster: an approve for it in
@@ -313,8 +411,7 @@ async fn send_fallback<T: Transport, B: Bundle, S: Signer>(
     let digest = uo.safe_op_hash(c, 0, 0);
     let sigs = op::safe_signatures(vec![signer.sign(digest).await?])?;
     uo.signature = op::op_signature(0, 0, &sigs);
-    let hash = bundle.send(c, &uo).await?;
-    wait(bundle, hash, sleep).await
+    hand_over(bundle, c, &uo, sleep).await
 }
 
 async fn wait<B: Bundle>(
@@ -322,8 +419,10 @@ async fn wait<B: Bundle>(
     hash: B256,
     sleep: &impl AsyncFn(u32),
 ) -> anyhow::Result<OpReceipt> {
-    for _ in 0..120 {
-        if let Some(r) = bundle.receipt(hash).await? {
+    let mut waited = 0;
+    while waited < 120 {
+        // A poll that fails says nothing about the operation: ask again.
+        if let Ok(Some(r)) = bundle.receipt(hash).await {
             anyhow::ensure!(
                 r.success,
                 "the operation reverted: {}",
@@ -331,9 +430,16 @@ async fn wait<B: Bundle>(
             );
             return Ok(r);
         }
-        sleep(1000).await;
+        // Often at first, then sparingly: the relay counts every poll.
+        let pause = if waited < 5 { 1 } else { 4 };
+        sleep(pause * 1000).await;
+        waited += pause;
     }
-    anyhow::bail!("the operation {hash} wasn't included in two minutes")
+    Err(Unconfirmed {
+        hash: Some(hash),
+        cause: None,
+    }
+    .into())
 }
 
 async fn send_circle<T: Transport, B: Bundle, S: Signer>(
@@ -407,8 +513,7 @@ async fn send_circle<T: Transport, B: Bundle, S: Signer>(
     let digest = uo.safe_op_hash(c, 0, 0);
     let sigs = op::safe_signatures(vec![signer.sign(digest).await?])?;
     uo.signature = op::op_signature(0, 0, &sigs);
-    let hash = bundle.send(c, &uo).await?;
-    wait(bundle, hash, sleep).await
+    hand_over(bundle, c, &uo, sleep).await
 }
 
 /// What an operation can cost at most in USDC (6 decimals) at Circle's
@@ -442,4 +547,154 @@ pub async fn owners<T: Transport>(
         return Ok(super::safe::getOwnersCall::abi_decode_returns(&out)?);
     }
     Ok(super::safe::parse_owners(c, setup)?.owners(c))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    /// A bundler answering receipt polls from a script, then with nothing.
+    struct Scripted {
+        polls: RefCell<Vec<anyhow::Result<Option<OpReceipt>>>>,
+        asked: Cell<usize>,
+    }
+
+    impl Bundle for Scripted {
+        async fn gas_price(&self) -> anyhow::Result<GasPrice> {
+            unreachable!()
+        }
+        async fn estimate(&self, _: &Contracts, _: &UserOp) -> anyhow::Result<Estimate> {
+            unreachable!()
+        }
+        async fn send(&self, _: &Contracts, _: &UserOp) -> anyhow::Result<B256> {
+            unreachable!()
+        }
+        async fn receipt(&self, _: B256) -> anyhow::Result<Option<OpReceipt>> {
+            self.asked.set(self.asked.get() + 1);
+            self.polls.borrow_mut().pop().unwrap_or(Ok(None))
+        }
+    }
+
+    fn landed(success: bool) -> OpReceipt {
+        OpReceipt {
+            success,
+            actual_gas_used: U256::from(1u64),
+            actual_gas_cost: U256::from(1u64),
+            transaction_hash: B256::repeat_byte(9),
+            block_number: 1,
+            reason: None,
+        }
+    }
+
+    fn contracts() -> Contracts {
+        let a = format!("{:#x}", Address::ZERO);
+        serde_json::from_value(serde_json::json!({
+            "chain_id": 84532,
+            "entry_point": a, "safe_singleton": a, "proxy_factory": a,
+            "safe_4337_module": a, "safe_module_setup": a, "multi_send": a,
+            "multi_send_call_only": a, "webauthn_shared_signer": a,
+            "webauthn_signer_factory": a,
+            "p256_verifiers": "0x1000000000000000000000000000000000000000000",
+            "usdc": a, "usdc_name": "USDC", "paymaster": a,
+            "fallback_paymaster": a, "settlement": a,
+        }))
+        .unwrap()
+    }
+
+    /// Refuses, or loses, what's handed to it, and never has a receipt.
+    struct Send(fn() -> anyhow::Error);
+
+    impl Bundle for Send {
+        async fn gas_price(&self) -> anyhow::Result<GasPrice> {
+            unreachable!()
+        }
+        async fn estimate(&self, _: &Contracts, _: &UserOp) -> anyhow::Result<Estimate> {
+            unreachable!()
+        }
+        async fn send(&self, _: &Contracts, _: &UserOp) -> anyhow::Result<B256> {
+            Err((self.0)())
+        }
+        async fn receipt(&self, _: B256) -> anyhow::Result<Option<OpReceipt>> {
+            Ok(None)
+        }
+    }
+
+    fn node(code: i64, message: &str) -> anyhow::Error {
+        NodeError {
+            code,
+            message: message.into(),
+            data: None,
+        }
+        .into()
+    }
+
+    #[tokio::test]
+    async fn only_a_refusal_says_a_send_didnt_happen() {
+        let sleep = async |_: u32| {};
+        let (c, uo) = (contracts(), UserOp::default());
+        let refusals: [fn() -> anyhow::Error; 5] = [
+            || node(-32501, "AA33 reverted"),
+            || node(-32501, "AA33 reverted").context("pimlico refused it"),
+            || node(-32602, "preVerificationGas is too low"),
+            || node(-32500, "AA21 didn't pay prefund"),
+            || NotSent("too many attempts".into()).into(),
+        ];
+        for refused in refusals {
+            let e = hand_over(&Send(refused), &c, &uo, &sleep)
+                .await
+                .unwrap_err();
+            assert!(!may_have_landed(&e), "{e:#}");
+        }
+        let unknowns: [fn() -> anyhow::Error; 6] = [
+            || anyhow::anyhow!("the connection dropped"),
+            || anyhow::anyhow!("https://x.example/rpc?apikey=pim_xAA3q answered 502"),
+            || anyhow::anyhow!("https://paymaster.example/rpc answered 504"),
+            || node(-32603, "internal error in the paymaster"),
+            || node(-32500, "AA25 invalid account nonce"),
+            || node(-32602, "already known"),
+        ];
+        for unknown in unknowns {
+            let e = hand_over(&Send(unknown), &c, &uo, &sleep)
+                .await
+                .unwrap_err();
+            assert!(may_have_landed(&e), "{e:#}");
+            let cause = format!("{:#}", unknown());
+            let said = format!("{e:#}");
+            assert!(said.starts_with("sent, not yet confirmed"), "{said}");
+            assert!(
+                said.ends_with(&cause),
+                "the cause is kept, and last: {said}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_poll_is_asked_again_and_silence_is_never_a_failure() {
+        let sleep = async |_: u32| {};
+        let hash = B256::repeat_byte(1);
+        let blip = Scripted {
+            polls: RefCell::new(vec![Ok(Some(landed(true))), Err(anyhow::anyhow!("429"))]),
+            asked: Cell::new(0),
+        };
+        assert!(wait(&blip, hash, &sleep).await.unwrap().success);
+        assert_eq!(blip.asked.get(), 2);
+
+        let silent = Scripted {
+            polls: RefCell::new(Vec::new()),
+            asked: Cell::new(0),
+        };
+        let e = wait(&silent, hash, &sleep).await.unwrap_err();
+        assert!(may_have_landed(&e), "nothing may be built in its place");
+        assert!(may_have_landed(&e.context("claiming")));
+
+        // Included and reverted: nothing moved, so it may be built again.
+        let reverted = Scripted {
+            polls: RefCell::new(vec![Ok(Some(landed(false)))]),
+            asked: Cell::new(0),
+        };
+        assert!(!may_have_landed(
+            &wait(&reverted, hash, &sleep).await.unwrap_err()
+        ));
+    }
 }

@@ -233,6 +233,52 @@ endpoint!(
     DevLastAuthLink, Get, "/dev/last-auth-link", Public, Empty => DevAuthLink
 );
 
+// --- account security (MONEY.md#stolen-sign-ins) ------------------------------
+
+endpoint!(
+    /// Email a sign-in link to the account's verified address. Always
+    /// answers 200, so it cannot tell anyone which addresses have accounts.
+    AuthSendSigninLink, Post, "/auth/signin-link", Public, EmailOnly => Empty
+);
+endpoint!(
+    /// The emailed link, once and briefly: it signs this browser in.
+    AuthSigninLink, Post, "/auth/signin-link/confirm", Public, TokenOnly => Me
+);
+
+endpoint!(
+    /// Ask to move the account's email: a link goes to the new address, and
+    /// nothing changes until it's opened.
+    AccountEmailChange, Post, "/account/email", Verified, EmailOnly => Empty
+);
+endpoint!(
+    /// The new address's link: the change happens, and the old address is
+    /// told, with a link that undoes it for one waiting period.
+    AccountEmailConfirm, Post, "/account/email/confirm", Public, TokenOnly => Empty
+);
+
+/// What a notice's one-time link does, before it's used.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkInfo {
+    /// cancel_bind | stop_retirement | undo_email
+    pub action: String,
+    pub expires_at: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkDone {
+    /// What it did, in plain words.
+    pub said: String,
+}
+
+endpoint!(
+    /// What a link would do. Nothing changes: mail scanners open links.
+    LinkPeek, Post, "/links/peek", Public, TokenOnly => LinkInfo
+);
+endpoint!(
+    /// Use a link, once, with no sign-in.
+    LinkUse, Post, "/links/use", Public, TokenOnly => LinkDone
+);
+
 /// Where Google sends the browser back to. A browser navigation, not a call:
 /// the api answers it with a redirect to the site.
 pub const PATH_GOOGLE_CALLBACK: &str = "/auth/google/callback";

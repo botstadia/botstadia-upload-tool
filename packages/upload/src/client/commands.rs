@@ -344,13 +344,14 @@ pub fn confirm_wallet(args: ConfirmWalletArgs) -> Result<()> {
 
 #[derive(Debug, clap::Args)]
 pub struct SignArgs {
-    /// `start` or `stop` the bot's retirement.
+    /// `start` or `stop` the bot's retirement, or `code-exposed`: mark the
+    /// bot code-exposed because its author key leaked (sent at once).
     pub action: String,
     /// The bot's id, as the site shows it.
     #[arg(long)]
     pub bot: String,
     /// The request id the site gave for this retirement.
-    #[arg(long)]
+    #[arg(long, default_value = "")]
     pub request: String,
     /// Don't ask before signing (for scripts that already showed the text).
     #[arg(long)]
@@ -364,10 +365,17 @@ pub struct SignArgs {
 /// anything else; it never signs text it's handed, which a phisher could
 /// word as something else (a wallet bind, say).
 pub fn sign(args: SignArgs) -> Result<()> {
+    if args.action == "code-exposed" {
+        return code_exposed(args);
+    }
     let action = match args.action.as_str() {
         "start" | "stop" => args.action.as_str(),
-        other => bail!("`{other}` isn't an action: start or stop"),
+        other => bail!("`{other}` isn't an action: start, stop or code-exposed"),
     };
+    anyhow::ensure!(
+        !args.request.is_empty(),
+        "a retirement's signature needs the site's --request"
+    );
     let message = botstadia_shared::platform::retirement_message(action, &args.bot, &args.request);
     let key = existing_key()?;
     // The prompt on stderr: stdout carries only the signature.
@@ -382,6 +390,36 @@ pub fn sign(args: SignArgs) -> Result<()> {
         }
     }
     println!("{}", key.sign(&message)?);
+    Ok(())
+}
+
+/// Mark a bot code-exposed with its author key, because that key leaked
+/// (TRUST.md#a-leaked-bundlekey-cant-be-taken-back): a label only, which
+/// can't be undone, and its backers are told. It signs only that message.
+fn code_exposed(args: SignArgs) -> Result<()> {
+    let s = Settings::load()?;
+    let message = botstadia_shared::platform::code_exposed_message(&args.bot);
+    let key = existing_key()?;
+    eprintln!("Sign with author key {}:\n\n{message}\n", key.address());
+    eprintln!("Do this only if this bot's author key may have leaked: it can't be undone.");
+    if !args.yes {
+        if !config::interactive() {
+            bail!("run it interactively, or pass --yes once you've checked the text");
+        }
+        if !config::ask("Mark it code-exposed? [y/N] ")?.eq_ignore_ascii_case("y") {
+            bail!("not marked");
+        }
+    }
+    let signature = key.sign(&message)?;
+    api::call_public::<botstadia_shared::platform::BotCodeExposed>(
+        &s,
+        &botstadia_shared::platform::CodeExposedSigned {
+            bot_id: args.bot.clone(),
+            by: "author".into(),
+            signature,
+        },
+    )?;
+    println!("Done: {} is marked code-exposed.", args.bot);
     Ok(())
 }
 

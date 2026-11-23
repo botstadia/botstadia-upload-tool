@@ -7,6 +7,7 @@
 pub mod api;
 pub mod auth;
 pub mod error;
+pub mod notices;
 pub mod platform;
 
 use serde::{Deserialize, Serialize};

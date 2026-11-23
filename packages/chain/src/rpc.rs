@@ -43,7 +43,8 @@ impl BlockTag {
     #[cfg(botstadia_devnet)]
     pub const SETTLED_LAG: &'static str = "a few minutes";
 
-    pub(crate) fn json(&self) -> Value {
+    /// As a JSON-RPC parameter.
+    pub fn json(&self) -> Value {
         match self {
             Self::Latest => json!("latest"),
             Self::Safe => json!("safe"),
@@ -288,6 +289,91 @@ impl<T: Transport> Client<T> {
             )
             .await?;
         Ok(serde_json::from_value(v)?)
+    }
+
+    /// [`Client::logs`], only those whose first topic is one of `topics`.
+    pub async fn logs_of(
+        &self,
+        addresses: &[Address],
+        topics: &[B256],
+        from_block: u64,
+        to_block: u64,
+    ) -> anyhow::Result<Vec<Log>> {
+        let v = self
+            .request(
+                "eth_getLogs",
+                json!([{
+                    "address": addresses,
+                    "topics": [topics],
+                    "fromBlock": format!("0x{from_block:x}"),
+                    "toBlock": format!("0x{to_block:x}"),
+                }]),
+            )
+            .await?;
+        Ok(serde_json::from_value(v)?)
+    }
+
+    /// One block's logs by those addresses with those topics, from its
+    /// receipts: for a block with more than a log read will return.
+    pub async fn block_logs_of(
+        &self,
+        addresses: &[Address],
+        topics: &[B256],
+        block: u64,
+    ) -> anyhow::Result<Vec<Log>> {
+        #[derive(serde::Deserialize)]
+        struct Logged {
+            logs: Vec<Log>,
+        }
+        let v = self
+            .request("eth_getBlockReceipts", json!([format!("0x{block:x}")]))
+            .await?;
+        let receipts: Vec<Logged> = serde_json::from_value(v)?;
+        Ok(receipts
+            .into_iter()
+            .flat_map(|r| r.logs)
+            .filter(|l| {
+                addresses.contains(&l.address)
+                    && l.topics.first().is_some_and(|t| topics.contains(t))
+            })
+            .collect())
+    }
+
+    /// [`Client::block_logs_of`] a transaction at a time, holding only what
+    /// matches: for a block whose receipts are too big to take at once.
+    pub async fn block_logs_by_transaction(
+        &self,
+        addresses: &[Address],
+        topics: &[B256],
+        block: u64,
+    ) -> anyhow::Result<Vec<Log>> {
+        #[derive(serde::Deserialize)]
+        struct Listed {
+            transactions: Vec<B256>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Logged {
+            logs: Vec<Log>,
+        }
+        let v = self
+            .request(
+                "eth_getBlockByNumber",
+                json!([format!("0x{block:x}"), false]),
+            )
+            .await?;
+        let listed: Listed = serde_json::from_value(v)?;
+        let mut out = Vec::new();
+        for hash in listed.transactions {
+            let v = self
+                .request("eth_getTransactionReceipt", json!([hash]))
+                .await?;
+            let receipt: Logged = serde_json::from_value(v)?;
+            out.extend(receipt.logs.into_iter().filter(|l| {
+                addresses.contains(&l.address)
+                    && l.topics.first().is_some_and(|t| topics.contains(t))
+            }));
+        }
+        Ok(out)
     }
 }
 
